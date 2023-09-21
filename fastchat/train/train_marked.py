@@ -14,16 +14,16 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
-from dataclasses import dataclass, field
 import json
 import math
 import pathlib
-from typing import Dict, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 import transformers
+from torch.utils.data import Dataset
 from transformers import Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
@@ -70,8 +70,9 @@ def rank0_print(*args):
 
 
 def trainer_save_model_safe(trainer: transformers.Trainer):
+    from torch.distributed.fsdp import FullStateDictConfig
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-    from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+    from torch.distributed.fsdp import StateDictType
 
     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
     with FSDP.state_dict_type(
