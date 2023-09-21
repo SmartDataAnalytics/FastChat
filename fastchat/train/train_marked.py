@@ -20,7 +20,6 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-import numpy as np
 import torch
 import transformers
 from torch.utils.data import Dataset
@@ -48,7 +47,9 @@ class DataArguments:
         default=None, metadata={"help": "Path to the evaluation data."}
     )
     lazy_preprocess: bool = False
-    conversation_template_name: str = "one_shot"
+    conversation_template_name: str = "zero_shot_marked"
+    keep_begin_marker: bool = True
+    keep_end_marker: bool = True
 
 
 @dataclass
@@ -87,6 +88,8 @@ def preprocess(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
     conv_template: Conversation,
+    keep_begin_marker: bool = True,
+    keep_end_marker: bool = True,
 ) -> Dict:
     roles = {"human": conv_template.roles[0], "gpt": conv_template.roles[1]}
 
@@ -112,48 +115,43 @@ def preprocess(
         max_length=tokenizer.model_max_length,
         truncation=True,
     ).input_ids
-    targets = input_ids.clone()
+    targets = torch.empty_like(input_ids)
 
-    assert conv_template.sep_style == SeparatorStyle.ADD_COLON_TWO
+    assert conv_template.sep_style == SeparatorStyle.COLON_SURROUND
 
-    # Mask targets. Only compute loss on the assistant outputs.
-    sep = conv_template.sep + conv_template.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+    begin_output = tokenizer.convert_tokens_to_ids(conv_template.sep)
+    end_output = tokenizer.convert_tokens_to_ids(conv_template.sep2)
 
-        turns = conversation.split(conv_template.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_TOKEN_ID
-        for i, turn in enumerate(turns):
-            if turn == "":
+    for target, inp in zip(targets, input_ids):
+        is_inside_output = False
+
+        # Keep track of output index explicitly because begin and end token might need to be filtered out
+        out_idx = 0
+        for in_idx in range(len(inp)):
+            token = inp[in_idx].item()
+
+            if token == begin_output:
+                is_inside_output = True
+                if keep_begin_marker:
+                    inp[out_idx] = token
+                    target[out_idx] = IGNORE_TOKEN_ID
+                    out_idx += 1
+            elif token == end_output:
+                is_inside_output = False
+                if keep_end_marker:
+                    inp[out_idx] = token
+                    target[out_idx] = token
+                    out_idx += 1
+            elif token == tokenizer.pad_token_id:
+                # Padding is only on the right side --> the remaining positions can be set in one go after the loop
                 break
-            turn_len = len(tokenizer(turn).input_ids)
-
-            parts = turn.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
-            # "-2" is hardcoded for the LLaMA tokenizer to make the offset correct.
-            instruction_len = len(tokenizer(parts[0]).input_ids) - 2
-
-            # Ignore the user instructions
-            target[cur_len : cur_len + instruction_len] = IGNORE_TOKEN_ID
-            cur_len += turn_len
-
-        target[cur_len:] = IGNORE_TOKEN_ID
-
-        if False:  # Inspect and check the correctness of masking
-            z = target.clone()
-            z = torch.where(z == IGNORE_TOKEN_ID, tokenizer.unk_token_id, z)
-            rank0_print(tokenizer.decode(z))
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_TOKEN_ID
-                rank0_print(
-                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                    f" (ignored)"
-                )
+            else:
+                inp[out_idx] = token
+                target[out_idx] = token if is_inside_output else IGNORE_TOKEN_ID
+                out_idx += 1
+        # If begin or end tokens are filtered out, some of the input/target tokens are not yet set
+        inp[out_idx:] = tokenizer.pad_token_id
+        target[out_idx:] = IGNORE_TOKEN_ID
 
     return dict(
         input_ids=input_ids,
@@ -231,6 +229,8 @@ def make_supervised_data_module(
 
     preprocess_kwargs = {
         "conv_template": conv_template,
+        "keep_begin_marker": data_args.keep_begin_marker,
+        "keep_end_marker": data_args.keep_end_marker,
     }
     train_json = json.load(open(data_args.data_path, "r"))
     train_dataset = dataset_cls(train_json, tokenizer=tokenizer, preprocess_kwargs=preprocess_kwargs)
