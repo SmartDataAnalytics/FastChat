@@ -36,6 +36,7 @@ IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
+    trust_remote_code: bool = False
 
 
 @dataclass
@@ -249,6 +250,7 @@ def train():
     config = transformers.AutoConfig.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
+        trust_remote_code=model_args.trust_remote_code,
     )
     orig_ctx_len = getattr(config, "max_position_embeddings", None)
     if orig_ctx_len and training_args.model_max_length > orig_ctx_len:
@@ -261,6 +263,7 @@ def train():
         model_args.model_name_or_path,
         config=config,
         cache_dir=training_args.cache_dir,
+        trust_remote_code=model_args.trust_remote_code,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -268,6 +271,7 @@ def train():
         model_max_length=training_args.model_max_length,
         padding_side="right",
         use_fast=False,
+        trust_remote_code=model_args.trust_remote_code,
     )
     if tokenizer.pad_token_id is None:
         tokenizer.add_special_tokens({"additional_special_tokens": ["<pad>"]})
