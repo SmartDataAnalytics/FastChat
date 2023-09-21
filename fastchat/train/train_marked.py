@@ -27,8 +27,8 @@ from torch.utils.data import Dataset
 from transformers import Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
-from fastchat.conversation import SeparatorStyle
-from fastchat.model.model_adapter import get_conversation_template
+from fastchat.conversation import SeparatorStyle, Conversation
+from fastchat.model.model_adapter import get_conv_template
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -48,6 +48,7 @@ class DataArguments:
         default=None, metadata={"help": "Path to the evaluation data."}
     )
     lazy_preprocess: bool = False
+    conversation_template_name: str = "one_shot"
 
 
 @dataclass
@@ -85,23 +86,23 @@ def trainer_save_model_safe(trainer: transformers.Trainer):
 def preprocess(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
+    conv_template: Conversation,
 ) -> Dict:
-    conv = get_conversation_template("vicuna")
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+    roles = {"human": conv_template.roles[0], "gpt": conv_template.roles[1]}
 
     # Apply prompt templates
     conversations = []
     for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
+        if roles[source[0]["from"]] != conv_template.roles[0]:
             # Skip the first one if it is not from human
             source = source[1:]
 
-        conv.messages = []
+        conv_template.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
-            conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
+            assert role == conv_template.roles[j % 2], f"{i}"
+            conv_template.append_message(role, sentence["value"])
+        conversations.append(conv_template.get_prompt())
 
     # Tokenize conversations
     input_ids = tokenizer(
@@ -113,14 +114,14 @@ def preprocess(
     ).input_ids
     targets = input_ids.clone()
 
-    assert conv.sep_style == SeparatorStyle.ADD_COLON_TWO
+    assert conv_template.sep_style == SeparatorStyle.ADD_COLON_TWO
 
     # Mask targets. Only compute loss on the assistant outputs.
-    sep = conv.sep + conv.roles[1] + ": "
+    sep = conv_template.sep + conv_template.roles[1] + ": "
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-        turns = conversation.split(conv.sep2)
+        turns = conversation.split(conv_template.sep2)
         cur_len = 1
         target[:cur_len] = IGNORE_TOKEN_ID
         for i, turn in enumerate(turns):
@@ -164,12 +165,12 @@ def preprocess(
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
+    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer, preprocess_kwargs):
         super(SupervisedDataset, self).__init__()
 
         rank0_print("Formatting inputs...")
         sources = [example["conversations"] for example in raw_data]
-        data_dict = preprocess(sources, tokenizer)
+        data_dict = preprocess(sources, tokenizer, **preprocess_kwargs)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
@@ -189,7 +190,7 @@ class SupervisedDataset(Dataset):
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer):
+    def __init__(self, raw_data, tokenizer: transformers.PreTrainedTokenizer, preprocess_kwargs):
         super(LazySupervisedDataset, self).__init__()
         self.tokenizer = tokenizer
 
@@ -197,6 +198,7 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.raw_data = raw_data
         self.cached_data_dict = {}
+        self.preprocess_kwargs = preprocess_kwargs
 
     def __len__(self):
         return len(self.raw_data)
@@ -205,7 +207,7 @@ class LazySupervisedDataset(Dataset):
         if i in self.cached_data_dict:
             return self.cached_data_dict[i]
 
-        ret = preprocess([self.raw_data[i]["conversations"]], self.tokenizer)
+        ret = preprocess([self.raw_data[i]["conversations"]], self.tokenizer, **self.preprocess_kwargs)
         ret = dict(
             input_ids=ret["input_ids"][0],
             labels=ret["labels"][0],
@@ -217,7 +219,9 @@ class LazySupervisedDataset(Dataset):
 
 
 def make_supervised_data_module(
-    tokenizer: transformers.PreTrainedTokenizer, data_args
+        tokenizer: transformers.PreTrainedTokenizer,
+        data_args: DataArguments,
+        conv_template: Conversation,
 ) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
     dataset_cls = (
@@ -225,12 +229,15 @@ def make_supervised_data_module(
     )
     rank0_print("Loading data...")
 
+    preprocess_kwargs = {
+        "conv_template": conv_template,
+    }
     train_json = json.load(open(data_args.data_path, "r"))
-    train_dataset = dataset_cls(train_json, tokenizer=tokenizer)
+    train_dataset = dataset_cls(train_json, tokenizer=tokenizer, preprocess_kwargs=preprocess_kwargs)
 
     if data_args.eval_data_path:
         eval_json = json.load(open(data_args.eval_data_path, "r"))
-        eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer)
+        eval_dataset = dataset_cls(eval_json, tokenizer=tokenizer, preprocess_kwargs=preprocess_kwargs)
     else:
         eval_dataset = None
 
@@ -265,6 +272,7 @@ def train():
         cache_dir=training_args.cache_dir,
         trust_remote_code=model_args.trust_remote_code,
     )
+    conv_template = get_conv_template(data_args.conversation_template_name)
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
@@ -279,7 +287,7 @@ def train():
         model.resize_token_embeddings(len(tokenizer))
 
     # Load data
-    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args, conv_template=conv_template)
 
     # Start trainner
     trainer = Trainer(
