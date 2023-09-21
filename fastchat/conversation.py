@@ -27,6 +27,7 @@ class SeparatorStyle(IntEnum):
     RWKV = auto()
     PHOENIX = auto()
     ROBIN = auto()
+    COLON_SURROUND = auto()
     FALCON_CHAT = auto()
 
 
@@ -201,6 +202,16 @@ class Conversation:
                 else:
                     ret += role + ":\n"
             return ret
+        elif self.sep_style == SeparatorStyle.COLON_SURROUND:
+            ret = system_prompt
+            for role, message in self.messages:
+                if role == self.roles[1]:
+                    if message:
+                        ret += f"\n{role}:{self.sep} {message}{self.sep2}"
+                    else:
+                        ret += f"\n{role}:{self.sep}"
+                else:
+                    ret += f"\n{role}: {message}"
         elif self.sep_style == SeparatorStyle.FALCON_CHAT:
             ret = ""
             if self.system_message:
@@ -949,6 +960,20 @@ register_conv_template(
         sep="\n",
         sep2="</s>\n",
         stop_str="<|user|>",
+    )
+)
+
+register_conv_template(
+    Conversation(
+        name="zero_shot_marked",
+        system_template="System: {system_message}",
+        system_message="A chat between a curious human and an artificial intelligence assistant. "
+        "The assistant gives helpful, detailed, and polite answers to the human's questions.",
+        roles=("User", "Assistant"),
+        sep_style=SeparatorStyle.COLON_SURROUND,
+        sep="<output>",
+        sep2="</output>",
+        stop_str="</output>",
     )
 )
 
