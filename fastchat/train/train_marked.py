@@ -269,6 +269,10 @@ def train():
         padding_side="right",
         use_fast=False,
     )
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({"additional_special_tokens": ["<pad>"]})
+        tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<pad>")
+        model.resize_token_embeddings(len(tokenizer))
 
     # Load data
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
