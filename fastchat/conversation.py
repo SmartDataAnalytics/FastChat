@@ -212,6 +212,7 @@ class Conversation:
                         ret += f"\n{role}:{self.sep}"
                 else:
                     ret += f"\n{role}: {message}"
+            return ret
         elif self.sep_style == SeparatorStyle.FALCON_CHAT:
             ret = ""
             if self.system_message:
